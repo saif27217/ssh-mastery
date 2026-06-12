@@ -1,19 +1,19 @@
 # SSH Mastery — Agent Skill
 
-This repo is the single source of truth for the VPS ↔ Termux SSH pipeline. Any agent that loads this skill can operate the entire infrastructure as an expert.
+This repo is the single source of truth for the VPS ↔ remote-device SSH pipeline. Any agent that loads this skill can operate the entire infrastructure as an expert.
 
 ## TL;DR — The 30-Second Mental Model
 
 ```
-VPS (Hermes Agent) ──Tailscale──► Termux (1min.ai proxy on port 9000)
+VPS (Hermes Agent) ──Tailscale──► Remote device (AI proxy on port 9000)
       ▲                                    │
       └──── SSH (port 8022) ───────────────┘
 ```
 
-- **Proxy runs on Termux**: `oneminai_server.py` (FastAPI, Python 3.13, port 9000)
-- **Access from VPS**: `http://100.70.18.84:9000/v1`
-- **SSH into Termux**: `ssh sak@100.70.18.84 -p 8022`
-- **Hermes uses it via**: `1minai-local` provider in `~/.hermes/config.yaml`
+- **Proxy runs on remote device**: AI proxy (FastAPI, Python 3.x, port 9000)
+- **Access from VPS**: `http://<remote-ip>:9000/v1`
+- **SSH into remote device**: `ssh <user>@<remote-ip> -p <ssh-port>`
+- **Hermes uses it via**: provider in `~/.hermes/config.yaml`
 
 ## Repo Layout
 
@@ -22,12 +22,11 @@ ssh-mastery/
 ├── AGENTS.md              ← YOU ARE HERE (this file)
 ├── README.md              ← Architecture + quick commands
 ├── scripts/
-│   ├── start_oneminai.sh  ← Start the proxy on Termux
-│   ├── start_proot_server.sh  ← Deprecated! Do NOT use. See "Critical Pitfalls".
+│   ├── start_proxy.sh   ← Start the proxy on remote device
 │   └── telegram-setup.sh  ← Telegram bot setup
 ├── termux/
-│   ├── oneminai_server.py ← Main proxy server (patched for thread + memory)
-│   └── .env.oneminai.example ← API key template
+│   ├── proxy_server.py    ← Main proxy server (patched for thread + memory)
+│   └── .env.example       ← API key template
 ├── proot-backup/          ← Legacy proot files. Reference only. Do NOT deploy these.
 └── vps-docs/              ← Historical docs from the project
 ```
@@ -37,39 +36,35 @@ ssh-mastery/
 ### 1. NEVER use proot-distro for background services
 proot-distro has `--kill-on-exit` — it kills ALL child processes when the login session ends. This means:
 - **Bad**: `proot-distro login -- bash -c "uvicorn server.py &"` → dies on logout
-- **Good**: Termux native Python: `python3 oneminai_server.py &` → survives
+- **Good**: Native Python: `python3 proxy_server.py &` → survives
 - The `proot-backup/` directory exists only as historical reference.
 
 ### 2. Tailscale connectivity is not guaranteed
 Devices may go offline. Always verify reachability before attempting operations:
 ```bash
 # From VPS, check if device is reachable
-tailscale ping 100.70.18.84   # Termux
-tailscale ping 100.77.100.52  # Ammara-1
-ping -c 2 100.118.62.87       # desktop-ti7ns54 (if Tailscale ping fails)
+tailscale ping <remote-ip>   # or
+ping -c 2 <remote-ip>
 ```
 
-**Key insight:** A host that responds to ping may have NO SSH ports open at all (e.g., desktop-ti7ns54 at 100.118.62.87 is pingable but has no SSH server — only PostgreSQL on 5432). Always scan ports before assuming SSH is available.
+**Key insight:** A host that responds to ping may have NO SSH ports open at all (e.g., a desktop node reachable via Tailscale but with no SSH server — only PostgreSQL). Always scan ports before assuming SSH is available.
 
-### 3. SSH to Termux requires Termux:SSH package
-Termux does not ship with an SSH daemon by default. You need:
-- Install `termux-api` and `openssh` in Termux
-- Start SSH: `sshd` (runs on port 8022 by default)
-- The SSH key is `~/.ssh/id_ed25519` on the VPS, paired with the Termux public key
+### 3. SSH to remote devices requires an SSH daemon
+Some platforms (e.g., Termux) do not ship with an SSH daemon by default. You need:
+- Install the SSH package (e.g., `openssh` on Termux)
+- Start the daemon: `sshd` (runs on port 8022 by default)
+- The SSH key is `~/.ssh/id_ed25519` on the VPS, paired with the remote device's public key
 
 ### 4. API key must match exactly
-The key in `config.yaml` (VPS) and `.env` (Termux) must be identical:
-- Length: 64 characters
-- Pattern: starts with `cd316c`, ends with `ac314`
-- Mismatch causes `invalid_api_key` errors
+The key in `config.yaml` (VPS) and `.env` (remote) must be identical. Mismatch causes `invalid_api_key` errors.
 
-### 5. Thread persistence lives on Termux, not in git
-The file `~/.hermes_conversation_ids.json` on Termux stores conversation UUIDs. This is auto-created by the proxy and should NOT be committed to git (it's in `.gitignore`).
+### 5. Thread persistence lives on the remote device, not in git
+Files like `~/.conversation_ids.json` store session UUIDs. These are auto-created by the proxy and should NOT be committed to git (they're in `.gitignore`).
 
 ### 6. SSH key auth is preferred over password
-When passwordless SSH key auth is set up, it eliminates TTY/prompt issues entirely. The VPS key (`sak@srv1405080`) is already authorized on Ammara-1. For new hosts, always copy the public key first:
+When passwordless SSH key auth is set up, it eliminates TTY/prompt issues entirely. For new hosts, always copy the public key first:
 ```bash
-ssh-copy-id user@host  # or manually append to ~/.ssh/authorized_keys
+ssh-copy-id <user>@<host>  # or manually append to ~/.ssh/authorized_keys
 ```
 
 ### 7. Port scanning rule: one timeout is enough
@@ -79,51 +74,50 @@ If `echo >/dev/tcp/HOST/PORT` hangs (times out), do NOT retry. The port is eithe
 
 ### Start the proxy (from VPS)
 ```bash
-ssh sak@100.70.18.84 -p 8022 'cd ~ && python3 oneminai_server.py &'
+ssh <user>@<remote-ip> -p <ssh-port> 'cd ~ && python3 proxy_server.py &'
 ```
 
 ### Check health
 ```bash
 # From VPS
-curl http://100.70.18.84:9000/health
+curl http://<remote-ip>:9000/health
 
-# From Termux (local)
+# From remote device (local)
 curl http://127.0.0.1:9000/health
 ```
 
 ### Restart the proxy
 ```bash
-ssh sak@100.70.18.84 -p 8022 'pkill -f oneminai_server.py; sleep 1; cd ~ && python3 oneminai_server.py &'
+ssh <user>@<remote-ip> -p <ssh-port> 'pkill -f proxy_server.py; sleep 1; cd ~ && python3 proxy_server.py &'
 ```
 
 ### Check if running
 ```bash
-ssh sak@100.70.18.84 -p 8022 'ps aux | grep oneminai | grep -v grep'
+ssh <user>@<remote-ip> -p <ssh-port> 'ps aux | grep proxy_server | grep -v grep'
 ```
 
 ### Test an API call
 ```bash
-curl -s http://100.70.18.84:9000/v1/chat/completions \
+curl -s http://<remote-ip>:9000/v1/chat/completions \
   -H "Content-Type: application/json" \
-  -H "Authorization: Bearer *** \
+  -H "Authorization: Bearer <api-key>" \
   -d '{"model":"gpt-4o-mini","messages":[{"role":"user","content":"test"}],"max_tokens":10}'
 ```
 
 ## Hermes Integration
 
 ### Current config (VPS `~/.hermes/config.yaml`)
-The `1minai-local` provider is already configured. Model aliases:
-- `1m` → `gpt-4o-mini` via 1min.ai proxy (works)
-- `1m-flash` → `gemini-2.0-flash` via 1min.ai proxy (fails — tier limit)
-- `1m-sonnet` → `claude-3-5-sonnet` via 1min.ai proxy (fails — tier limit)
+The provider is already configured. Model aliases:
+- `m1` → model A via proxy (works)
+- `m2` → model B via proxy (may fail — tier limit)
 
 ### To enable SSH backend for Hermes
 Set these environment variables (in `~/.hermes/.env` or system env):
 ```bash
-TERMINAL_SSH_HOST=100.70.18.84
-TERMINAL_SSH_USER=sak
-TERMINAL_SSH_PORT=8022
-TERMINAL_SSH_KEY=/home/sak/.ssh/id_ed25519
+TERMINAL_SSH_HOST=<remote-ip>
+TERMINAL_SSH_USER=<user>
+TERMINAL_SSH_PORT=<ssh-port>
+TERMINAL_SSH_KEY=<path-to-ssh-key>
 TERMINAL_ENV=ssh
 ```
 
@@ -134,20 +128,20 @@ systemctl restart hermes-gateway
 
 The SSH backend (`tools/environments/ssh.py`) uses ControlMaster for persistent connections, auto-detects remote home, and syncs files via SCP/tar. It requires both `ssh_host` AND `ssh_user` to be set.
 
-## Server Code — oneminai_server.py
+## Server Code — proxy_server.py
 
 This is the main FastAPI proxy. Key features:
 
 ### Thread Persistence
-- Uses `~/.hermes_conversation_ids.json` to store UUIDs per user
+- Uses `~/.conversation_ids.json` to store UUIDs per user
 - Each new user gets a fresh UUID; subsequent calls reuse it
 - Enables multi-turn conversations within a thread
 
 ### Account-Level Memory
-- Sends `withMemories: true` in every API request to 1min.ai
+- Sends `withMemories: true` in every API request to the upstream
 - Memory is tied to the **account** (API key), not individual conversations
 - Persists across sessions, devices, and apps using the same key
-- Manage memory entries via the 1min.ai web UI
+- Manage memory entries via the upstream web UI
 
 ### API Endpoints
 - `POST /v1/chat/completions` — OpenAI-compatible chat endpoint
@@ -160,16 +154,6 @@ This is the main FastAPI proxy. Key features:
   "messages": [{"role": "user", "content": "Hello"}],
   "max_tokens": 10,
   "conversation_id": "uuid-here"  // optional, auto-managed
-}
-```
-
-### What Gets Sent to 1min.ai
-```json
-{
-  "model": "...",
-  "messages": [...],
-  "withMemories": true,
-  "conversationId": "uuid-here"
 }
 ```
 
@@ -217,7 +201,7 @@ stdin, stdout, stderr = client.exec_command('hostname && whoami')
 print(stdout.read().decode())
 
 # Check processes
-stdin, stdout, stderr = client.exec_command('ss -tlnp | grep 20128')
+stdin, stdout, stderr = client.exec_command('ss -tlnp | grep <port>')
 print(stdout.read().decode())
 
 client.close()
@@ -254,13 +238,13 @@ Note: Starting background processes via exec_command can be unreliable with `noh
 
 ### SSH Tunnel for Service Auth Bypass
 
-Some services (like 9router) require auth for remote API access but trust localhost connections. Create an SSH tunnel to bypass this:
+Some services (like AI routers) require auth for remote API access but trust localhost connections. Create an SSH tunnel to bypass this:
 
 ```bash
-# One-shot tunnel: local:12028 → remote:20128 (use terminal(background=true))
-ssh -N -L 12028:localhost:20128 user@remote_host
+# One-shot tunnel: local:<lp> → remote:<rp> (use terminal(background=true))
+ssh -N -L <local-port>:localhost:<remote-port> user@remote_host
 
-# Then point providers at http://127.0.0.1:12028/v1
+# Then point providers at http://127.0.0.1:<local-port>/v1
 ```
 
 **Persistent tunnel script** (`~/.hermes/scripts/service-tunnel.sh`):
@@ -270,7 +254,7 @@ while true; do
   ssh -o StrictHostKeyChecking=no -o BatchMode=yes \
     -o ServerAliveInterval=15 -o ServerAliveCountMax=3 \
     -o ExitOnForwardFailure=yes \
-    -N -L 12028:localhost:20128 user@remote_host
+    -N -L <local-port>:localhost:<remote-port> user@remote_host
   sleep 3
 done
 ```
@@ -282,33 +266,33 @@ Start with `terminal(background=true)` — do NOT use nohup/disown in foreground
 After setting up a tunnel, update the provider URL:
 ```bash
 # With hermes CLI (preferred)
-hermes config set providers.<name>.base_url http://127.0.0.1:12028/v1
+hermes config set providers.<name>.base_url http://127.0.0.1:<local-port>/v1
 
 # With sed (requires user approval)
-sed -i 's|old_url|http://127.0.0.1:12028/v1|' ~/.hermes/config.yaml
+sed -i 's|old_url|http://127.0.0.1:<local-port>/v1|' ~/.hermes/config.yaml
 ```
 
 ### "All providers unavailable"
-- Check if the proxy is running: `curl http://100.70.18.84:9000/health`
-- If healthy, the issue is likely a 1min.ai tier limitation for that model
-- Models known to fail: `gemini-2.0-flash`, `claude-3-5-sonnet`
+- Check if the proxy is running: `curl http://<remote-ip>:9000/health`
+- If healthy, the issue is likely an upstream tier limitation for that model
+- Models known to fail: check upstream provider documentation
 
 ### "invalid_api_key"
-- Verify the API key in `config.yaml` matches the one in Termux `.env`
-- Both must be 64 characters, identical content
+- Verify the API key in `config.yaml` matches the one in remote `.env`
+- Both must be identical
 
 ### Connection timed out
-- Check Tailscale connectivity: `tailscale ping 100.70.18.84`
-- The Android device may be offline or have Tailscale disabled
+- Check Tailscale connectivity: `tailscale ping <remote-ip>`
+- The remote device may be offline or have Tailscale disabled
 - Try pinging from the VPS first before attempting SSH
 
 ### Proxy not responding after restart
-- Check if the process is running: `ps aux | grep oneminai`
-- If not, start it: `python3 oneminai_server.py &`
+- Check if the process is running: `ps aux | grep proxy`
+- If not, start it: `python3 proxy_server.py &`
 - If it starts then dies, check for port conflicts or syntax errors
 
 ### Hermes can't reach the proxy
-- Verify `config.yaml` has correct `base_url`: `http://100.70.18.84:9000/v1`
+- Verify `config.yaml` has correct `base_url`: `http://<remote-ip>:9000/v1`
 - Restart the gateway: `systemctl restart hermes-gateway`
 - Check gateway logs: `journalctl -u hermes-gateway --no-pager -n 50`
 
@@ -316,7 +300,7 @@ sed -i 's|old_url|http://127.0.0.1:12028/v1|' ~/.hermes/config.yaml
 
 ### Pushing changes
 ```bash
-# On VPS (for this repo)
+# On VPS
 cd ~/.hermes/repos/ssh-mastery
 git add .
 git commit -m "description"
@@ -329,44 +313,38 @@ cd ~/.hermes/repos/ssh-mastery
 git pull
 ```
 
-### Syncing proxy from git to Termux
+### Syncing proxy from git to remote device
 ```bash
 # After committing changes on VPS:
-scp ~/.hermes/repos/ssh-mastery/termux/oneminai_server.py sak@100.70.18.84:/data/data/com.termux/files/home/ -P 8022
-ssh sak@100.70.18.84 -p 8022 'pkill -f oneminai_server.py; sleep 1; cd ~ && python3 oneminai_server.py &'
+scp ~/.hermes/repos/ssh-mastery/termux/proxy_server.py <user>@<remote-ip>:/path/to/home/ -P <ssh-port>
+ssh <user>@<remote-ip> -p <ssh-port> 'pkill -f proxy_server.py; sleep 1; cd ~ && python3 proxy_server.py &'
 ```
 
 ## Network Diagram
 
 ```
-Internet
-    │
-    ▼
-┌──────────────────┐     Tailscale wireguard      ┌─────────────────────┐
-│  Hostinger VPS    │ ◄──────────────────────────► │  OnePlus 5 (Termux) │
-│  76.13.243.223   │     100.92.56.61             │  100.70.18.84       │
-│                  │         ══════════            │                     │
-│  Hermes Gateway  │         │  Port 9000          │  oneminai_server.py │
-│  (systemd)       │ ──────► │  FastAPI/uvicorn    │  (Python 3.13)      │
-│                  │         │                     │                     │
-│  Terminal: local │         │                     │  SSH: port 8022     │
-│  Tailscale IP    │         │                     │  Termux:SSH         │
-│  100.92.56.61   │         │                     │  Tailscale IP       │
-└──────────────────┘         │                     │  100.70.18.84       │
-                             │                     └─────────────────────┘
-                             │
-                      Port 8022 (SSH)
-                      sak@100.70.18.84
+┌─────────────────────┐         Tailscale wireguard        ┌──────────────────────────┐
+│   VPS (Agent host)  │ ◄──────────────────────────────►  │ Remote device            │
+│                     │                                    │                          │
+│  Hermes Gateway     │   Port 9000 (FastAPI proxy)        │  proxy_server.py         │
+│  (systemd)          │ ◄─────────────────────────────────►│  (Python)                │
+│                     │                                    │                          │
+│  Terminal: local    │                                    │  SSH daemon: port <sp>   │
+│  Tailscale IP       │                                    │  Tailscale IP: <rip>     │
+└─────────────────────┘                                    └──────────────────────────┘
+                                                           │
+                                                    Port <sp> (SSH)
+                                                    <user>@<remote-ip>
 ```
 
 ## Memory Architecture
 
-1min.ai has two memory tiers:
+The upstream provider has two memory tiers:
 
 | Tier | Scope | Resettable? | Managed By |
 |------|-------|-------------|------------|
 | Conversation History | Single thread (`conversationId`) | Yes (`clearHistory: true`) | Auto |
-| Account Memory | All threads, all sessions | No (manual) | 1min.ai web UI |
+| Account Memory | All threads, all sessions | No (manual) | Upstream web UI |
 
 The proxy sends `withMemories: true` to enable account memory. This means the AI remembers things introduced in previous turns even across separate API calls.
 
@@ -374,10 +352,10 @@ The proxy sends `withMemories: true` to enable account memory. This means the AI
 
 | File | Location | Purpose |
 |------|----------|---------|
-| Proxy server | Termux: `~/oneminai_server.py` | Main FastAPI proxy |
-| API key (Termux) | Termux: `~/.env` | ONEMINAI_API_KEY |
-| API key (VPS) | VPS: `~/.hermes/config.yaml` → `1minai-local.api_key` | Provider config |
-| Thread storage | Termux: `~/.hermes_conversation_ids.json` | UUID per user |
+| Proxy server | Remote: `~/proxy_server.py` | Main FastAPI proxy |
+| API key (remote) | Remote: `~/.env` | Upstream API key |
+| API key (VPS) | VPS: `~/.hermes/config.yaml` → provider config | Provider config |
+| Thread storage | Remote: `~/.conversation_ids.json` | UUID per user |
 | Hermes config | VPS: `~/.hermes/config.yaml` | Provider + terminal settings |
-| SSH key | VPS: `~/.ssh/id_ed25519` | Key for SSH to Termux |
+| SSH key | VPS: `~/.ssh/id_ed25519` | Key for SSH to remote |
 | Gateway service | VPS: `systemctl status hermes-gateway` | Hermes gateway process |
