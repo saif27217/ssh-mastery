@@ -41,12 +41,15 @@ proot-distro has `--kill-on-exit` — it kills ALL child processes when the logi
 - The `proot-backup/` directory exists only as historical reference.
 
 ### 2. Tailscale connectivity is not guaranteed
-The Android device may go offline. Always verify reachability before attempting operations:
+Devices may go offline. Always verify reachability before attempting operations:
 ```bash
-# From VPS, check if Termux is reachable
-tailscale ping 100.70.18.84   # or use the ping tool
-curl --connect-timeout 5 http://100.70.18.84:9000/health
+# From VPS, check if device is reachable
+tailscale ping 100.70.18.84   # Termux
+tailscale ping 100.77.100.52  # Ammara-1
+ping -c 2 100.118.62.87       # desktop-ti7ns54 (if Tailscale ping fails)
 ```
+
+**Key insight:** A host that responds to ping may have NO SSH ports open at all (e.g., desktop-ti7ns54 at 100.118.62.87 is pingable but has no SSH server — only PostgreSQL on 5432). Always scan ports before assuming SSH is available.
 
 ### 3. SSH to Termux requires Termux:SSH package
 Termux does not ship with an SSH daemon by default. You need:
@@ -62,6 +65,15 @@ The key in `config.yaml` (VPS) and `.env` (Termux) must be identical:
 
 ### 5. Thread persistence lives on Termux, not in git
 The file `~/.hermes_conversation_ids.json` on Termux stores conversation UUIDs. This is auto-created by the proxy and should NOT be committed to git (it's in `.gitignore`).
+
+### 6. SSH key auth is preferred over password
+When passwordless SSH key auth is set up, it eliminates TTY/prompt issues entirely. The VPS key (`sak@srv1405080`) is already authorized on Ammara-1. For new hosts, always copy the public key first:
+```bash
+ssh-copy-id user@host  # or manually append to ~/.ssh/authorized_keys
+```
+
+### 7. Port scanning rule: one timeout is enough
+If `echo >/dev/tcp/HOST/PORT` hangs (times out), do NOT retry. The port is either firewalled (DROP rule) or no service is listening. Re-scanning won't change the result until the remote end changes. Move to the next diagnostic step.
 
 ## How to Operate the Proxy
 
@@ -162,6 +174,119 @@ This is the main FastAPI proxy. Key features:
 ```
 
 ## Troubleshooting
+
+### SSH Diagnostic Order
+
+When an SSH connection fails, follow this exact sequence:
+
+```bash
+# 1. Host reachable?
+ping -c 2 <IP>               # ICMP works? Host is alive on network
+tailscale ping <IP>           # Tailscale peer? Device is on tailnet
+
+# 2. Port open?
+timeout 3 bash -c "echo > /dev/tcp/<IP>/22" 2>/dev/null && echo OPEN || echo CLOSED
+
+# 3. Verbose handshake (watch where it hangs)
+ssh -v user@<IP>
+```
+
+**Where it hangs tells you the cause:**
+| Symptom | Cause | Fix |
+|---------|-------|-----|
+| `Connection established` → hangs at KEX | Server-side: sshd overloaded, slow crypto | Restart sshd on remote |
+| `KEX_ECDH_REPLY received` → auth fails | Authentication: wrong key/password | Add key or try password |
+| `password:` prompt (no TTY) | Need paramiko or sshpass | Use Python paramiko |
+| Connection refused | No SSH server or wrong port | Install SSH or scan ports |
+| Connection timed out | Port blocked by firewall | Check iptables/UFW on remote |
+
+**Critical: Do NOT escalate retries on timeout.** If port 22 times out once, it will time out every time until the remote end changes.
+
+### Password Auth Without a TTY (paramiko)
+
+When `sshpass` and `expect` are unavailable (common on stripped-down systems or no-root environments), use paramiko (already installed with Hermes):
+
+```python
+import paramiko
+client = paramiko.SSHClient()
+client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+client.connect('<host>', username='<user>', password='<password>', timeout=10)
+
+# Run commands
+stdin, stdout, stderr = client.exec_command('hostname && whoami')
+print(stdout.read().decode())
+
+# Check processes
+stdin, stdout, stderr = client.exec_command('ss -tlnp | grep 20128')
+print(stdout.read().decode())
+
+client.close()
+```
+
+**Quoting pitfall:** Python string escapes in exec_command can break with nested quotes. Solutions:
+- Simple commands: `client.exec_command('ls -la')` works fine
+- Complex pipes/variables: write a script file to remote, then execute it
+- Use heredocs via `stdin.write()` + `channel.shutdown_write()`
+
+### Port Scanning via paramiko
+
+```python
+stdin, stdout, stderr = client.exec_command('''for port in 22 2222 8022 20128 3000 5432; do
+  echo -n "Port $port: "
+  timeout 3 bash -c "echo >/dev/tcp/127.0.0.1/$port" 2>/dev/null && echo OPEN || echo CLOSED
+done''')
+print(stdout.read().decode())
+```
+
+### Starting Remote Background Processes via paramiko
+
+```python
+transport = client.get_transport()
+chan = transport.open_session()
+chan.set_combine_stderr(True)
+chan.exec_command('cd /home/user && PORT=20128 nohup node server.js > /tmp/log 2>&1 & echo STARTED')
+import time; time.sleep(2)
+print(chan.recv(1024).decode())
+chan.close()
+```
+
+Note: Starting background processes via exec_command can be unreliable with `nohup`/`&`. The `transport.open_session()` approach works better.
+
+### SSH Tunnel for Service Auth Bypass
+
+Some services (like 9router) require auth for remote API access but trust localhost connections. Create an SSH tunnel to bypass this:
+
+```bash
+# One-shot tunnel: local:12028 → remote:20128 (use terminal(background=true))
+ssh -N -L 12028:localhost:20128 user@remote_host
+
+# Then point providers at http://127.0.0.1:12028/v1
+```
+
+**Persistent tunnel script** (`~/.hermes/scripts/service-tunnel.sh`):
+```bash
+#!/bin/bash
+while true; do
+  ssh -o StrictHostKeyChecking=no -o BatchMode=yes \
+    -o ServerAliveInterval=15 -o ServerAliveCountMax=3 \
+    -o ExitOnForwardFailure=yes \
+    -N -L 12028:localhost:20128 user@remote_host
+  sleep 3
+done
+```
+
+Start with `terminal(background=true)` — do NOT use nohup/disown in foreground commands as they're blocked.
+
+### Config Management for Hermes Providers
+
+After setting up a tunnel, update the provider URL:
+```bash
+# With hermes CLI (preferred)
+hermes config set providers.<name>.base_url http://127.0.0.1:12028/v1
+
+# With sed (requires user approval)
+sed -i 's|old_url|http://127.0.0.1:12028/v1|' ~/.hermes/config.yaml
+```
 
 ### "All providers unavailable"
 - Check if the proxy is running: `curl http://100.70.18.84:9000/health`

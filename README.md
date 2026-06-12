@@ -26,10 +26,17 @@ A complete reference for connecting a Linux VPS to an Android device (Termux) vi
 
 ## Key IPs & Ports
 
-| Device | Role | Tailscale IP | SSH Port | Service Port |
-|--------|------|-------------|----------|-------------|
+| Device | Role | Tailscale IP | SSH Port | Service Ports |
+|--------|------|-------------|----------|--------------|
 | VPS (Hostinger) | Agent host | `100.92.56.61` | N/A (outbound only) | N/A |
-| Termux (OnePlus 5) | Remote server | `100.70.18.84` | `8022` (Termux SSH) | `9000` (FastAPI) |
+| Termux (OnePlus 5) | Remote server | `100.70.18.84` | `8022` (Termux SSH) | `9000` (FastAPI), `20128` (9Router) |
+| Ammara-1 | AI infrastructure | `100.77.100.52` | `22` (key + password) | `20128` (9Router w/ 95 models), `5432` (PostgreSQL) |
+| desktop-ti7ns54 | Desktop | `100.118.62.87` | **CLOSED** (no SSH) | `5432` (PostgreSQL only) |
+
+**Host reachability notes:**
+- A pingable host may have NO open ports (desktop-ti7ns54 is reachable via Tailscale but has no SSH server — only PostgreSQL)
+- Always scan ports before assuming a service is available
+- Scan common ports: `for p in 22 2222 8022 20128 3000 5432 80 443 8080; do echo -n "$p: "; timeout 3 bash -c "echo >/dev/tcp/IP/$p" 2>/dev/null && echo OPEN || echo CLOSED; done`
 
 ## Quick Commands
 
