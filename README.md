@@ -18,25 +18,25 @@ A complete reference for connecting a Linux VPS to a remote device via SSH, runn
 
 **Why this setup:**
 - Remote device may be behind NAT — cannot accept inbound connections from VPS directly
-- Hermes Agent SSH backend requires `TERMINAL_SSH_HOST` + `TERMINAL_SSH_USER` to be set (currently using `local`)
+- Hermes Agent SSH backend requires TERMINAL_SSH_HOST + TERMINAL_SSH_USER to be set (currently using local)
 - The AI proxy runs on the remote device and is accessed from the VPS over Tailscale
 - Platform-specific pitfalls (e.g., proot-distro killing background processes) are documented below
 
 ## Key IPs & Ports
 
-All specific IPs, hostnames, and usernames are kept out of this public repo. Configure them in your local `~/.hermes/config.yaml` and `.env` files.
+All specific IPs, hostnames, and usernames are kept out of this public repo. Configure them in your local ~/.hermes/config.yaml and .env files.
 
 | Device | Role | Connectivity | SSH Port | Service Ports |
 |--------|------|-------------|----------|--------------|
 | VPS | Agent host | Tailscale outbound | N/A | N/A |
-| Remote device 1 | AI proxy host | Tailscale | `<ssh-port>` | `9000` (FastAPI proxy), `<other-ports>` |
-| Remote device 2 | AI infrastructure | Tailscale | `<ssh-port>` (key + password) | `<router-port>` (AI router), `5432` (PostgreSQL) |
-| Remote device 3 | Desktop | Tailscale | **CLOSED** (no SSH) | `5432` (PostgreSQL only) |
+| Remote device 1 | AI proxy host | Tailscale | <ssh-port> | 9000 (FastAPI proxy), <other-ports> |
+| Remote device 2 | AI infrastructure | Tailscale | <ssh-port> (key + password) | <router-port> (AI router), 5432 (PostgreSQL) |
+| Remote device 3 | Desktop | Tailscale | CLOSED (no SSH) | 5432 (PostgreSQL only) |
 
 **Host reachability notes:**
 - A pingable host may have NO open ports (some devices are reachable via Tailscale but have no SSH server — only PostgreSQL or other services)
 - Always scan ports before assuming a service is available
-- Scan common ports: `for p in 22 2222 8022 20128 3000 5432 80 443 8080; do echo -n "$p: "; timeout 3 bash -c "echo >/dev/tcp/IP/$p" 2>/dev/null && echo OPEN || echo CLOSED; done`
+- Scan common ports: for p in 22 2222 8022 20128 3000 5432 80 443 8080; do echo -n "$p: "; timeout 3 bash -c "echo >/dev/tcp/IP/$p" 2>/dev/null && echo OPEN || echo CLOSED; done
 
 ## Quick Commands
 
@@ -74,7 +74,7 @@ python3 proxy_server.py &
 
 ## Hermes Configuration
 
-The VPS `~/.hermes/config.yaml` has the provider configured:
+The VPS ~/.hermes/config.yaml has the provider configured:
 
 ```yaml
 providers:
@@ -87,7 +87,7 @@ providers:
         max_output_tokens: 65536
 ```
 
-To enable SSH backend (for direct command execution on the remote device), set in `~/.hermes/.env` or via environment:
+To enable SSH backend (for direct command execution on the remote device), set in ~/.hermes/.env or via environment:
 
 ```bash
 TERMINAL_SSH_HOST=<remote-ip>
@@ -109,19 +109,47 @@ ssh-mastery/
 ├── termux/
 │   ├── proxy_server.py            # Main FastAPI proxy server (patched: thread persistence + memory)
 │   └── .env.example               # Template for API key configuration
-├── proot-backup/
-│   └── ...                        # Legacy proot files (reference only — broken)
 └── vps-docs/
     └── ...                        # Historical docs from the project
 ```
 
 ## Known Limitations
 
-1. **Proot-distro kills background processes** — always use native Python for persistent services
-2. **Tailscale on mobile devices** — the device may go offline; check status before attempting connections
-3. **Model tier limits** — some models may fail due to upstream account limitations (not proxy issues)
-4. **SSH to remote device** — requires SSH package installed; port varies by platform
+1. Proot-distro kills background processes — always use native Python for persistent services
+2. Tailscale on mobile devices — the device may go offline; check status before attempting connections
+3. Model tier limits — some models may fail due to upstream account limitations (not proxy issues)
+4. SSH to remote device — requires SSH package installed; port varies by platform
 
-## Related Repos
+## Tunnel/Tailscale Troubleshooting
 
-- [ssh-mastery](https://github.com/saif27217/ssh-mastery) — this repo
+### Headers arrive, body stalls — Tailscale MTU blackhole
+
+Symptom: curl prints the HTTP status line and headers, then hangs until timeout with exit code 18 or transfer closed with outstanding read data remaining.
+
+```bash
+# This hangs mid-body:
+curl -v http://127.0.0.1:<PORT>/v1/models
+
+# But this often works from the same box:
+curl -v http://<remote-ip>:<PORT>/v1/models
+```
+
+And the service responds fine locally on the remote host:
+
+```bash
+curl -s http://127.0.0.1:20128/v1/models | wc -c   # full response
+cat /sys/class/net/tailscale0/mtu                  # 1280
+cat /proc/sys/net/ipv4/tcp_mtu_probing             # 0 = off
+```
+
+Root cause: Tailscale’s default 1280-byte MTU. With kernel PMTU probing disabled, oversized TCP segments get silently dropped. The kernel never backs off to smaller segments.
+
+Fix on the remote host:
+
+```bash
+echo 1 | sudo tee /proc/sys/net/ipv4/tcp_mtu_probing
+echo 'net.ipv4.tcp_mtu_probing = 1' | sudo tee /etc/sysctl.d/99-tcp-mtu-probing.conf
+sudo sysctl --system
+```
+
+First request after the change may take 6–10 s while the path MTU is rediscovered; subsequent requests drop to normal speeds.
