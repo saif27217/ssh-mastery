@@ -113,12 +113,123 @@ ssh-mastery/
     └── ...                        # Historical docs from the project
 ```
 
-## Known Limitations
+## Generic Remote Endpoint Connection Guide
 
-1. Proot-distro kills background processes — always use native Python for persistent services
-2. Tailscale on mobile devices — the device may go offline; check status before attempting connections
-3. Model tier limits — some models may fail due to upstream account limitations (not proxy issues)
-4. SSH to remote device — requires SSH package installed; port varies by platform
+Use this for any remote tool/endpoint (9router, FastAPI, databases, internal APIs) behind a remote host over Tailscale.
+
+### 1. Verify service is running locally on the remote host
+
+```bash
+# On remote host via SSH
+curl -s http://127.0.0.1:<PORT>/health
+ss -tlnp | grep <PORT>
+```
+
+If this fails, fix the service first.
+
+### 2. Confirm remote port is unreachable directly
+
+```bash
+curl -s http://<remote-ip>:<PORT>/v1/models
+# Expected: 401/403 or empty response
+```
+
+If this returns data without auth, the service is already public — skip to step 4.
+
+### 3. Create SSH tunnel (local forward)
+
+One-shot test:
+```bash
+ssh -N -o StrictHostKeyChecking=no -o ConnectTimeout=10 \
+  -o ServerAliveInterval=30 -o ServerAliveCountMax=3 \
+  -o TCPKeepAlive=yes -o ExitOnForwardFailure=yes \
+  -L 127.0.0.1:<LOCAL_PORT>:localhost:<REMOTE_PORT> <user>@<remote-ip>
+```
+
+Persistent (systemd unit):
+```ini
+[Unit]
+Description=SSH tunnel to <tool> on <remote-ip>
+After=network-online.target tailscaled.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/ssh \
+  -o StrictHostKeyChecking=no \
+  -o ServerAliveInterval=30 \
+  -o ServerAliveCountMax=3 \
+  -o TCPKeepAlive=yes \
+  -o ExitOnForwardFailure=yes \
+  -o ConnectTimeout=10 \
+  -o BatchMode=yes \
+  -N -L 127.0.0.1:<LOCAL_PORT>:localhost:<REMOTE_PORT> <user>@<remote-ip>
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=default.target
+```
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now <name>-tunnel.service
+```
+
+### 4. Verify end-to-end
+
+```bash
+timeout 3 bash -c 'echo > /dev/tcp/127.0.0.1/<LOCAL_PORT>' && echo ALIVE || echo DEAD
+
+curl -s --max-time 10 http://127.0.0.1:<LOCAL_PORT>/v1/models | head -c 200
+```
+
+### 5. If headers arrive but body stalls (Tailscale MTU blackhole)
+
+```bash
+# On the REMOTE host
+cat /sys/class/net/tailscale0/mtu                  # 1280
+cat /proc/sys/net/ipv4/tcp_mtu_probing             # 0 = off
+
+# Fix
+echo 1 | sudo tee /proc/sys/net/ipv4/tcp_mtu_probing
+echo 'net.ipv4.tcp_mtu_probing = 1' | sudo tee /etc/sysctl.d/99-tcp-mtu-probing.conf
+sudo sysctl --system
+```
+
+First request after fix takes 6–10 s. Subsequent requests are normal speed.
+
+### 6. Add to Hermes config
+
+```yaml
+providers:
+  <name>:
+    base_url: http://127.0.0.1:<LOCAL_PORT>/v1
+    api_key: <key-if-needed>
+    request_timeout_seconds: 300
+    stale_timeout_seconds: 600
+```
+
+Restart the Hermes gateway and test a real completion call.
+
+### 7. Common failure modes
+
+| Symptom | Cause | Fix |
+|---------|-------|-----|
+| DEAD port, SSH process running | Tunnel bound wrong target or remote service down | Check remote `ss -tlnp`, restart tunnel |
+| Headers OK, body stalls after 1–2 s | Tailscale MTU blackhole | Enable `tcp_mtu_probing=1` on remote |
+| API key required remotely | Tunnel not in place or pointing at wrong port | Confirm using `127.0.0.1:<LOCAL_PORT>` |
+| Tunnel dies after network change | No supervision | systemd `Restart=always`, not nohup/disown |
+| transfer closed with outstanding read data remaining | MTU issue (see above) | Fix MTU probing, don’t retry |
+
+## Known Limitations
+1. **Tailscale MTU blackhole**: if headers arrive but body stalls with `exit code 18` / `transfer closed with outstanding read data remaining`, enable `tcp_mtu_probing=1` on the remote host.
+2. **Proot-distro kills background processes** — always use native Python for persistent services
+3. **Tailscale on mobile devices** — the device may go offline; check status before attempting connections
+4. **Model tier limits** — some models may fail due to upstream account limitations (not proxy issues)
+5. **SSH to remote device** — requires SSH package installed; port varies by platform
+6. **Verify config before restart**: after changing any provider `<name>` or `base_url`, restart the Hermes gateway before testing new aliases.
+7. **Choosing `9router-op` vs `9router-pc`**: use one canonical mount if both point to the same upstream; duplicate mounts to the same endpoint are redundant.
 
 ## Tunnel/Tailscale Troubleshooting
 
