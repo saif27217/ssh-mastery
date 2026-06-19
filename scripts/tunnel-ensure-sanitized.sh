@@ -14,7 +14,8 @@
 #   1 — one or more tunnels unrecoverable
 #   2 — --check mode, at least one tunnel down
 
-set -euo pipefail
+set -uo pipefail
+# NOTE: no -e; we handle errors explicitly to avoid pipefail traps on grep
 
 # ─── Tunnel definitions ───────────────────────────────────────────────
 TUNNELS=(
@@ -52,36 +53,36 @@ port_listening() {
 http_healthy() {
     local code
     code=$(curl -s -o /dev/null -w "%{http_code}" --connect-timeout 5 \
-        --max-time 10 "http://127.0.0.1:${1}/v1/models" 2>/dev/null)
+        --max-time 10 "http://127.0.0.1:${1}/v1/models" 2>/dev/null) || true
     [[ "$code" != "000" && "$code" != "" ]]
 }
 
 ssh_reachable() {
     local host=$1 port=$2 user=$3 key=$4
     ssh -o ConnectTimeout=8 -o StrictHostKeyChecking=no -o BatchMode=yes \
-        -i "$key" "$user@$host" -p "$port" 'echo 1' </dev/null 2>/dev/null
+        -i "$key" "$user@$host" -p "$port" 'true' </dev/null 2>/dev/null
 }
 
 kill_tunnel_on_port() {
     local port=$1
-    local pid
-    pid=$(ss -tlnp 2>/dev/null | grep ":${port} " | grep -oP 'pid=\K[0-9]+' | head -1)
+    local pid=""
+    pid=$(ss -tlnp 2>/dev/null | grep ":${port} " | grep -oP 'pid=\K[0-9]+' | head -1 || true)
     if [[ -n "$pid" ]]; then
         kill "$pid" 2>/dev/null || true
         sleep 1
         kill -9 "$pid" 2>/dev/null || true
         sleep 0.5
     fi
+    # Also kill any orphaned ssh -L on this port
     pkill -f "ssh.*-L.*127.0.0.1:${port}:" 2>/dev/null || true
     sleep 0.5
 }
 
 start_tunnel() {
     local port=$1 host=$2 ssh_port=$3 user=$4 key=$5 target=$6
-    nohup ssh "${SSH_OPTS[@]}" -i "$key" -N \
+    ssh -f "${SSH_OPTS[@]}" -i "$key" -N \
         -L "127.0.0.1:${port}:${target}" \
-        "$user@$host" -p "$ssh_port" \
-        > /dev/null 2>&1 &
+        "$user@$host" -p "$ssh_port" 2>/dev/null
     sleep 2
 }
 
