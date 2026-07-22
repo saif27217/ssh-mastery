@@ -408,6 +408,59 @@ curl -s http://<remote-ip>:5000/            # Koofr
 
 ---
 
+## Openship on Termux — Server Self-Auth & Dashboard
+
+When Openship runs on Termux and you add Termux as its own server (e.g., `http://<tailscale-ip>:3001/servers`), there are specific pitfalls.
+
+### Problem 1: SSH Key Mismatch
+
+Openship's daemon process uses the **local `id_ed25519`** key to SSH into the server. If `authorized_keys` only has the VPS key, the daemon gets `Permission denied (publickey)`.
+
+**Fix**:
+```bash
+# On Termux, check the difference
+cat ~/.ssh/id_ed25519.pub     # local key
+cat ~/.ssh/authorized_keys     # what sshd will check
+
+# Add local key to authorized_keys
+cat ~/.ssh/id_ed25519.pub >> ~/.ssh/authorized_keys
+```
+
+### Problem 2: Absolute Key Path Required
+
+`~/.ssh/id_ed25519` does NOT resolve under the openship daemon. Must use full absolute path:
+
+```bash
+# WRONG — daemon cannot resolve ~
+openship server add --key-path "~/.ssh/id_ed25519"
+
+# CORRECT — full path from Termux home
+openship server add --key-path "/data/data/com.termux/files/home/.ssh/id_ed25519"
+```
+
+### Problem 3: CLI Login Before Server Commands
+
+All `openship server` commands require authentication. Run `openship login --token <pat>` before adding/checking/testing servers.
+
+### Problem 4: Dashboard Binding to Localhost
+
+Dashboard at port 3001 binds to `localhost` by default. To access via Tailscale:
+
+```bash
+nohup node dist/index.js up --foreground --public-url http://<tailscale-ip>:3001 > ~/openship.log 2>&1 &
+```
+
+### Ops Reference
+
+| Task | Command |
+|---|---|
+| Health check | `curl -s http://localhost:4000/api/health` |
+| Server add | `openship server add --name "Termux" --host "<ip>" --port 8022 --user "<user>" --auth-method "key" --key-path "/data/data/com.termux/files/home/.ssh/id_ed25519"` |
+| Server list | `openship server list` |
+| Server check | `openship server check <server-id>` |
+| Server test | `openship server test-connection --host <ip> --port 8022 --user <user> --auth-method key --key-path <full-path>` |
+| Restart | `pkill -f "dist/index" && nohup node dist/index.js up --foreground --public-url http://<ip>:3001 > ~/openship.log 2>&1 &` |
+
 ## References
 - [references/oneplus5-ammara1-status.md](references/oneplus5-ammara1-status.md) — Details the active endpoints, network status, services, and tunnels for OnePlus 5 and Ammara-1 as of June 16, 2026.
 - [references/termux-homelab.md](references/termux-homelab.md) — Full Termux homelab service-stack setup (Filebrowser + Memos + Tailscale + supervisord + Termux:Boot + rclone→Koofr), verified commands and pitfalls.
