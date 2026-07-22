@@ -336,6 +336,44 @@ else
 fi
 ```
 
+## Container Runtimes on Termux
+
+Running Docker or other container engines inside Termux has hard constraints that differ from a standard Linux VPS.
+
+### Docker daemon: DOES boot via proot -0 (but cannot pull)
+
+Docker 24.0.9 static binary **boots successfully** inside `proot -0` (fake root, no chroot) with these flags:
+- `--storage-driver=vfs` (avoids overlay calls)
+- `--bridge=none --iptables=false --ip-forward=false` (no networking syscalls)
+- Bind `/dev/cg2_bpf:/sys/fs/cgroup` (tricks Docker into cgroup v2 mode, skipping devices cgroup check)
+- Writable overlay dirs for `/var`, `/run`, `/tmp`, `/etc`
+- CA certs from Ubuntu rootfs (needed for TLS/registry)
+- resolv.conf with Google DNS (Android's DNS doesn't work inside proot)
+
+**What works:**
+- `docker info` → returns valid server info (version 24.0.9, cgroup v2, runc, VFS)
+- Containerd boots in 0.2s
+- Socket created at `/var/run/docker.sock`
+
+**Why `docker pull` fails:**
+Image layer unpacking calls `unshare(CLONE_NEWNS)` (mount namespace isolation). Android's seccomp policy (kernel 4.4) blocks this syscall with `EINVAL` before any code runs. This is a hard kernel-level restriction that cannot be worked around.
+
+### udocker: works for manual container runs
+
+[udocker](https://github.com/indigo-dc/udocker) uses proot as the container runtime — no kernel features needed. Can pull Docker images and execute commands inside containers.
+
+**Limitation**: CLI-only, no Docker API socket. Openship/Podman cannot use it as a deploy target.
+
+### Podman: blocked by missing namespaces
+
+`Error: cannot re-exec process` — Podman requires `CLONE_NEWNS` (mount namespace), blocked by Android kernel 4.4 seccomp policy. Not fixable.
+
+### Workaround for Docker-dependent services
+
+Run Docker on a machine with a modern kernel (VPS, MacBook) and point Termux tooling at it remotely. See `openship-setup` skill.
+
+---
+
 ## Common Pitfalls
 
 1. **The Proot Session Termination Trap**
