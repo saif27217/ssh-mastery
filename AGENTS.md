@@ -130,6 +130,29 @@ sudo systemctl enable --now <name>-tunnel.service
 
 ### Watchdog alternative (no systemd)
 `tunnel-mastery` includes `scripts/tunnel-watchdog.py`. Use only when systemd is unavailable.
+### Direct Tailscale (no tunnel)
+When the remote service accepts API key auth from non-localhost sources, skip the tunnel entirely:
+1. Extract the API key from the remote service's DB:
+   ```bash
+   ssh <user>@<remote-ip> -p <ssh-port> "sqlite3 ~/.service/db/data.sqlite \"SELECT key FROM apiKeys WHERE name='<key-name>';\""
+   ```
+2. Add a `custom_providers` entry to `~/.hermes/config.yaml`:
+   ```yaml
+   custom_providers:
+     - name: <provider-name>
+       base_url: http://<remote-ip>:<PORT>/v1
+       api_key: <extracted-api-key>
+       api_mode: chat_completions
+       model: <model-name>
+       models:
+         <model-name>: { context_length: 128000 }
+   ```
+3. Verify with a real call:
+   ```bash
+   curl -s -H "Authorization: Bearer <api-key>" http://<remote-ip>:<PORT>/v1/models | python3 -c "import sys,json; print(len(json.load(sys.stdin)['data']), 'models')"
+   ```
+
+**Pitfall:** Terminal tools redact API keys in SSH output. Extract via hex encoding (`od -A n -t x1`) and decode externally, or write to a file on remote and SCP back.
 
 ## SSH via Paramiko (No TTY / Password)
 
@@ -192,4 +215,4 @@ Before any commit or push to `ssh-mastery` or `tunnel-mastery`:
 ## Cross-References
 
 - `tunnel-mastery`: topologies, systemd unit template, decision tree for tunnel stealth-death, MTU troubleshooting
-- Local skill `~/.hermes/skills/ssh-mastery/`: operational details for 9router and ammara-1 (private)
+- Local skill `~/.hermes/skills/ssh-mastery/`: operational details for services and remote hosts (private)

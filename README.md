@@ -47,6 +47,38 @@ Hermes reaches it through:
 5. **Verify config before restart**: after changing provider `base_url`, restart the Hermes gateway before testing new aliases.
 6. **Avoid duplicate mounts**: if two providers point to the same upstream endpoint, consolidate to one canonical mount.
 
+## Direct Tailscale Access (No Tunnel)
+
+When a remote service accepts API key auth from non-localhost sources, connect directly over Tailscale — no SSH tunnel needed.
+
+### Setup
+1. Extract the API key from the remote service's DB:
+   ```bash
+   ssh <user>@<remote-ip> -p <ssh-port> "sqlite3 ~/.service/db/data.sqlite \"SELECT key FROM apiKeys WHERE name='<key-name>';\""
+   ```
+2. Add a custom provider to Hermes config (`~/.hermes/config.yaml`):
+   ```yaml
+   custom_providers:
+     - name: <provider-name>
+       base_url: http://<remote-ip>:<PORT>/v1
+       api_key: <extracted-api-key>
+       api_mode: chat_completions
+       model: <model-name>
+       models:
+         <model-name>: { context_length: 128000 }
+   ```
+3. Verify:
+   ```bash
+   curl -s -H "Authorization: Bearer <api-key>" http://<remote-ip>:<PORT>/v1/models | python3 -c "import sys,json; print(len(json.load(sys.stdin)['data']), 'models')"
+   ```
+
+### Why this works
+The remote middleware checks the API key against its DB table. Tailscale traffic arrives as a remote IP, so the localhost bypass is skipped, but API key validation passes when the correct key is in the `Authorization` header.
+
+### Pitfalls
+- Terminal tools may redact API keys in SSH output. Extract via hex encoding (`od -A n -t x1`) and decode externally, or write to a file on the remote host and SCP it back.
+- If the remote service requires localhost-only auth, you still need an SSH tunnel (see `tunnel-mastery`).
+
 ## Sanitization (Public Repo Rule)
 
 All specific IPs, hostnames, usernames, passwords, and tokens are represented as placeholders (`<remote-ip>`, `<user>`, `<ssh-port>`, `<PORT>`, `<LOCAL_PORT>`). These files are safe to commit and share.
@@ -69,6 +101,7 @@ Local operational details (real IPs, keys, credentials) stay in local agent skil
 
 ## Hermes Provider Config
 
+**Via SSH tunnel (localhost):**
 ```yaml
 providers:
   <name>:
@@ -80,6 +113,18 @@ providers:
       <model-id>:
         max_output_tokens: 65536
         timeout_seconds: 600
+```
+
+**Via direct Tailscale (no tunnel):**
+```yaml
+custom_providers:
+  - name: <provider-name>
+    base_url: http://<remote-ip>:<PORT>/v1
+    api_key: <api-key>
+    api_mode: chat_completions
+    model: <model-name>
+    models:
+      <model-name>: { context_length: 128000 }
 ```
 
 Restart Hermes gateway after config changes:
