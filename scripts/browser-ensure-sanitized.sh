@@ -16,7 +16,7 @@
 set -uo pipefail
 
 # ─── Termux connection ───────────────────────────────────────────────
-TERMUX_HOST="<termux-ip>"
+TERMUX_HOST="<remote-ip>"
 TERMUX_SSH_PORT="<ssh-port>"
 TERMUX_USER="<user>"
 SSH_KEY="$HOME/.ssh/id_ed25519"
@@ -58,9 +58,9 @@ get_daemon_info() {
 start_daemon() {
     # Kill any stale process first
     ssh_termux "pkill -f 'cli.py' 2>/dev/null; sleep 1"
-    # Start fresh
-    ssh_termux "cd $TBP_DIR && nohup python3 cli.py start --browser firefox > /tmp/tbp-start.log 2>&1 &"
-    sleep 3
+    # Start fresh — use setsid to fully detach from SSH session
+    ssh_termux "cd $TBP_DIR && setsid nohup python3 cli.py start --browser firefox > /tmp/tbp-start.log 2>&1 < /dev/null &"
+    sleep 5
 }
 
 # ─── Main ─────────────────────────────────────────────────────────────
